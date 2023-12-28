@@ -1,0 +1,250 @@
+
+#include<Wire.h>
+#include <MPU6050_light.h>  //Include library for MPU communication
+#include<LiquidCrystal.h>
+int encoderA= 2;
+int encoderB =13;
+int IN1 = A0;
+int IN2 = A1;
+int IN3 = A2;
+int IN4 = A3;
+int ENA=10;
+int ENB=11;
+int IRSENSOR1=12;
+int IRSENSOR2=3;
+const int rs = 8, en = 9, d4 = 4, d5 = 5, d6 = 6, d7 = 7;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+int currentStateA;
+int currentStateB;
+int varA;
+int varB;
+float distance;
+MPU6050 mpu(Wire);   //Create object mpu
+unsigned long timer = 0;    
+int trigger=2;
+int echo=13; //ultrasonic sensor
+long duration, cm;
+unsigned long timerANGLE=0;
+float previousAngleX=0.0;
+unsigned long stopStartTime = 0;
+unsigned long stopDuration = 2000; // 2 seconds in milliseconds
+
+
+void setup()
+{
+  Serial.begin(9600);
+// Set the output pins
+  pinMode(IRSENSOR1,INPUT);
+  pinMode(IRSENSOR2,INPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA,OUTPUT);
+  pinMode(ENB,OUTPUT);
+  
+  // Set encoder pins as inputs
+  pinMode(encoderA,INPUT);
+  pinMode(encoderB,INPUT);
+  lcd.begin(16,2);
+  //lcd.print("Distance:");
+  //Read the initial state of outputA & B
+  varA = digitalRead(encoderA);
+  varB = digitalRead(encoderB);
+  Wire.begin();     
+  mpu.begin();     
+  Serial.print(F("MPU6050 status: "));
+  Serial.println(F("Calculating offsets, do not move MPU6050"));   
+  mpu.calcGyroOffsets();     //Calibrate gyroscope
+  Serial.println("Done!\n");
+  pinMode(trigger, OUTPUT);
+}
+
+void forward(){
+  int irsensorstate1=digitalRead(IRSENSOR1);
+  int irsensorstate2=digitalRead(IRSENSOR2);
+  if (irsensorstate1==HIGH && irsensorstate2==HIGH){
+    //turn on the motors
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,66);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,66);}
+}
+void left(){
+  int irsensorstate1=digitalRead(IRSENSOR1);
+  int irsensorstate2=digitalRead(IRSENSOR2);
+  if (irsensorstate1==LOW && irsensorstate2==HIGH){
+    //turn left
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    analogWrite(ENA,120);
+    digitalWrite(IN3,HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,255);}
+}
+void right(){
+  int irsensorstate1=digitalRead(IRSENSOR1);
+  int irsensorstate2=digitalRead(IRSENSOR2);
+  if (irsensorstate1==HIGH && irsensorstate2==LOW){
+    //turnRIGHT
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,255);
+    digitalWrite(IN3,LOW);
+    digitalWrite(IN4, HIGH);
+    analogWrite(ENB,120);}
+}
+void stop(){
+  int irsensorstate1=digitalRead(IRSENSOR1);
+  int irsensorstate2=digitalRead(IRSENSOR2);
+    if (irsensorstate1==LOW && irsensorstate2==LOW){
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      analogWrite(ENA,0);
+      digitalWrite(IN3,LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENB,0);}
+}
+void dist(){
+  currentStateB = digitalRead(encoderB);
+    if (currentStateB != varB){
+      distance+=(1*21.2/3800);}
+  varB=currentStateB;
+}
+void display(){
+  
+  mpu.update(); //Get values from MPU
+  float angleX=mpu.getAngleX();
+  if ((millis() - timer) > 100) { // print data every 100ms
+    timer = millis();
+   if (angleX>previousAngleX){
+      previousAngleX=angleX;
+      lcd.clear();
+      lcd.print("Angle:");
+      lcd.print(angleX);  }   //Print X angle value on LCD (the final ramp angle)
+  }
+    
+  
+  //lcd.setCursor(0,1);
+  
+  lcd.setCursor(0,1);
+  lcd.print("dist:");
+  lcd.print(distance);
+  lcd.print(" t:");
+  lcd.print(millis()/1000);
+}
+void ultra(){
+  //long duration, inches, cm;
+  //pinMode(trigger, OUTPUT);
+  digitalWrite(trigger, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigger, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigger, LOW);
+  pinMode(echo, INPUT);
+  duration = pulseIn(echo, HIGH);
+  cm = microsecondsToCentimeters(duration);
+  delay(100);
+}
+long microsecondsToCentimeters(long microseconds) {
+  return microseconds / 29 / 2;
+}
+void angleDIFF(){
+  mpu.update();    //Get values from MPU
+  float angleX=mpu.getAngleX();
+  float angleDIFFX=angleX-previousAngleX;
+  previousAngleX=angleX;
+  //stop on ramp
+  
+  if (angleDIFFX<0.0 ){
+    //stop for 4s
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,0);
+    digitalWrite(IN3,LOW);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,0);
+    delay(4000);
+    //turn 360
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,255);
+    digitalWrite(IN3,LOW);
+    digitalWrite(IN4, HIGH);
+    analogWrite(ENB,200);
+    delay(1500);
+    
+  }
+}
+void loop()
+{ 
+  unsigned long currentTime=millis();
+  
+
+  if (currentTime<=4000 ){
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,200);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,220);
+  
+  
+  else if (currentTime>4000 && currentTime<=8000){
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,0);
+    digitalWrite(IN3,LOW);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,0);}
+  else if (currentTime>8000 && currentTime<=9700){
+    //turn 360
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,255);
+    digitalWrite(IN3,LOW);
+    digitalWrite(IN4, HIGH);
+    analogWrite(ENB,200);
+    
+  }
+  else if (currentTime>9700 && currentTime<=10700){
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    analogWrite(ENA,100);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENB,100);
+  }
+  else if (currentTime>10700){
+    if (distance >= 3.23 && distance<3.30 && stopStartTime == 0) {
+      stopStartTime = currentTime; }
+    // Check if the vehicle should stop and for how long
+    if (stopStartTime > 0 && currentTime - stopStartTime < stopDuration) {
+      // Vehicle should stop
+      digitalWrite(IN1, LOW);
+      digitalWrite(IN2, LOW);
+      analogWrite(ENA, 0);
+      digitalWrite(IN3, LOW);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENB, 0);
+    } else if (stopStartTime > 0 && currentTime - stopStartTime >= 2000 && stopStartTime > 0 && currentTime - stopStartTime < 2100) {
+      // Vehicle can move
+      digitalWrite(IN1, HIGH);
+      digitalWrite(IN2, LOW);
+      analogWrite(ENA,100);
+      digitalWrite(IN3, HIGH);
+      digitalWrite(IN4, LOW);
+      analogWrite(ENB,100);
+    }else{
+      forward();
+      left();
+      right();
+      stop();
+    }
+  }
+  dist();
+  display();
+  
+}
