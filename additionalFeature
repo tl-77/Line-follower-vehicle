@@ -1,0 +1,548 @@
+import RPi.GPIO as GPIO
+import cv2
+import numpy as np
+import time
+from time import sleep
+import math
+
+from imutils.video import VideoStream
+from imutils.video import FPS
+import face_recognition
+import imutils
+import pickle
+
+import threading
+import ctypes
+ctypes.CDLL("libX11.so.6").XInitThreads()
+
+video_capture = cv2.VideoCapture(0)
+video_capture.set(3, 160)
+video_capture.set(4, 120)
+in1 = 3
+in2 = 4
+in3 = 14
+in4 = 15
+enA = 2
+enB = 18
+encoderA = 16
+encoderB = 21
+currentStateA = 0
+previousStateA = 0
+currentStateB = 0
+previousStateB = 0
+start_time=time.time()
+difference_time=5
+difference_time2=2
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(in1, GPIO.OUT)
+GPIO.setup(in2, GPIO.OUT)
+GPIO.setup(enA, GPIO.OUT)
+GPIO.setup(in3, GPIO.OUT)
+GPIO.setup(in4, GPIO.OUT) 
+GPIO.setup(enB, GPIO.OUT)
+GPIO.setup(encoderA,GPIO.IN)
+GPIO.setup(encoderB,GPIO.IN)
+pwmA = GPIO.PWM(enA, 100)
+pwmB = GPIO.PWM(enB, 100)
+pwmA.start(0)
+pwmB.start(0)
+previousStateA=GPIO.input(encoderA)
+previousStateB=GPIO.input(encoderB)
+threshold = 94
+
+
+def auto_canny(image, sigma=0.33):
+    # compute the median of the single channel pixel intensities
+    v = np.median(image)
+
+    # apply automatic Canny edge detection using the computed median
+    lower = int(max(0, (1.0 - sigma) * v))
+    upper = int(min(255, (1.0 + sigma) * v))
+    edged = cv2.Canny(image, lower, upper)
+
+    # return the edged image
+    return edged
+           
+           
+def getContours(img,cThr=[100,100],showCanny=False,minArea=1000,filter=0,draw =False):
+    imgGray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+    imgBlur = cv2.GaussianBlur(imgGray,(3,3),1)
+    imgCanny = cv2.Canny(imgBlur,cThr[0],cThr[1])
+    kernel = np.ones((3,3))
+    imgDial = cv2.dilate(imgCanny,kernel,iterations=1)
+    imgThre = cv2.erode(imgDial,kernel,iterations=1)
+    if showCanny:cv2.imshow('Canny',imgThre)
+    
+    contours,hiearchy = cv2.findContours(imgThre,cv2.RETR_CCOMP,cv2.CHAIN_APPROX_SIMPLE)
+    finalCountours = []
+    for i, contour in enumerate(contours):
+    # If hierarchy[i][3] is not -1, it means the contour has a parent (internal contour)
+        if hierarchy[0][i][3] != -1:
+            area = cv2.contourArea(i)
+            if area > minArea:
+                peri = cv2.arcLength(i,True)
+                approx = cv2.approxPolyDP(i,0.02*peri,True)
+                bbox = cv2.boundingRect(approx)
+                if filter > 0:
+                    if len(approx) == filter:
+                        finalCountours.append([len(approx),area,approx,bbox,i])
+                else:
+                    finalCountours.append([len(approx),area,approx,bbox,i])
+    finalCountours = sorted(finalCountours,key = lambda x:x[1] ,reverse= True)
+
+    if draw:
+        for con in finalCountours:
+            cv2.drawContours(img,con[4],-1,(0,0,255),3)
+    return img, finalCountours,imgThre
+
+
+def getAngle(a, b, c):
+    ang = math.degrees(math.atan2(c[1]-b[1], c[0]-b[0]) - math.atan2(a[1]-b[1], a[0]-b[0]))
+    return ang + 360 if ang < 0 else ang
+
+
+def shape(contour,contours):
+    shape_name = ""
+    epsilon = cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, 0.01*epsilon, True)
+    # Classify shapes based on number of sides
+    num_sides = len(approx)
+    if num_sides == 3:
+        shape_name = "Triangle"
+                
+    elif num_sides == 4: 
+        x, y, w, h = cv2.boundingRect(approx)
+        aspect_ratio = float(w) / h
+        if 0.95 <= aspect_ratio <= 1.05:
+            shape_name = "Square"
+        else:
+            shape_name = "Rectangle"
+                    
+    elif num_sides == 5:
+        shape_name = "Pentagon"
+            
+    elif num_sides > 7:
+        circularity = (4*math.pi*cv2.contourArea(contour)/(epsilon*epsilon))
+        #print(circularity)
+        if circularity >0.8:
+            shape_name = "Circle"
+                    
+        elif circularity >0.6 and circularity <0.8:
+            shape_name = "Partial Circle"
+                    
+            
+    elif num_sides == 6:
+        shape_name = "Hexagon"
+                
+    elif num_sides == 7: 
+        if len(contours) > 0:
+            M = cv2.moments(contour)
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+            
+            else:
+                # If the contour has no area, return None
+                return None
+
+            # Find the point in the contour that is farthest from the centroid
+            max_distance = 0
+            max_distance_point = None
+            for point in contour:
+            # Calculate the distance from the centroid to the current point
+                distance = np.sqrt((point[0][0] - cx)*2 + (point[0][1] - cy)*2)
+                if distance > max_distance:
+                    max_distance = distance
+                    max_distance_point = point[0]
+                   
+                angle = np.arctan2(max_distance_point[1] - cy, max_distance_point[0] - cx) * 180 / np.pi
+                #print(angle)
+                
+                if -135 < angle <= -45:
+                    shape_name = "Up Arrow"
+                
+                elif 45 <= angle < 135:
+                    shape_name = "Down Arrow"
+            
+                elif -45 < angle < 45:
+                    shape_name = "Left Arrow"
+                    
+                else:
+                    shape_name = "Right Arrow"
+                         
+    return shape_name
+
+
+def motor(cx, cy, color_detected):
+    if color_detected == True:
+        
+        
+        
+        if cx >= 120:
+            #print ("Turn Right")
+            GPIO.output(in1,GPIO.LOW)
+            GPIO.output(in2,GPIO.HIGH)
+            pwmA.ChangeDutyCycle(50)
+            GPIO.output(in3,GPIO.HIGH)
+            GPIO.output(in4,GPIO.LOW)
+            pwmB.ChangeDutyCycle(50)
+                
+        
+            #sleep(1.5)
+            
+        if cx < 120 and cx > 50 and cy <80:
+            #print ("On Track!")
+            GPIO.output(in1,GPIO.HIGH)
+            GPIO.output(in2,GPIO.LOW)
+            pwmA.ChangeDutyCycle(28)
+            GPIO.output(in3,GPIO.HIGH)
+            GPIO.output(in4,GPIO.LOW)
+            pwmB.ChangeDutyCycle(28)
+        
+        
+        if cx <= 50:
+            #print( "Turn Left")
+            GPIO.output(in1,GPIO.HIGH)
+            GPIO.output(in2,GPIO.LOW)
+            pwmA.ChangeDutyCycle(50)
+            GPIO.output(in3,GPIO.LOW)
+            GPIO.output(in4,GPIO.HIGH)
+            pwmB.ChangeDutyCycle(50)
+        
+           
+
+def remove_noise(mask, kernel_size=3, iterations=1):
+    # Apply a morphological opening to remove noise
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    opening = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
+    
+    return opening
+
+def detect_black(frame):
+    # Convert frame to HSV color space
+    frame=cv2.resize(frame,(160,80))
+    height, width, _ = frame.shape
+    lower_height = int(height / 2)  # Taking the lower half
+    lower_part = frame[lower_height:, :]
+    hsv = cv2.cvtColor(lower_part, cv2.COLOR_BGR2HSV)
+    
+    # Define black color range
+    black_lower = np.array([0, 0, 0])
+    black_upper = np.array([180, 255, 30])
+    
+    color_detected = False  # Initialize color_detected
+    cx,cy = None,None
+    
+    # Detect black lines
+    mask = cv2.inRange(hsv, black_lower, black_upper)
+    cleaned_mask = remove_noise(mask, kernel_size=3, iterations=1)
+    contours, _ = cv2.findContours(cleaned_mask, 1, cv2.CHAIN_APPROX_NONE)
+    
+    if len(contours) > 0:
+        # Black line detected
+        
+        # Assuming only one contour is detected
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        
+        if M['m00'] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            #print("Black Line Detected - cx:", cx, "cy:", cy)
+            color_detected = True  # Reset color_detected flag
+            
+            # Move the car according to the black line
+            motor(cx, cy, color_detected)
+            
+        cv2.line(lower_part, (cx, 0), (cx, 720), (255, 0, 0), 1)
+        cv2.line(lower_part, (0, cy), (1280, cy), (255, 0, 0), 1)
+        cv2.drawContours(lower_part, [c], -1, (0, 255, 0), 1)
+        #cv2.putText(lower_part, color.capitalize(), (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+    
+    if not color_detected:
+        #print("I don't see the line")
+        if cx is not None:  # Check if cx has been assigned a value previously
+            # Adjust motor behavior based on the previous cx value
+            motor(cx, cy=None, color_detected=False)
+        else:
+            # No previous information, stop the robot
+            GPIO.output(in1,GPIO.LOW)
+            GPIO.output(in2,GPIO.HIGH)
+            pwmA.ChangeDutyCycle(28)
+            GPIO.output(in3,GPIO.LOW)
+            GPIO.output(in4,GPIO.HIGH)
+            pwmB.ChangeDutyCycle(28)
+    #cv2.imshow('Detected Lines', lower_part)
+            
+def detect_color(frame):
+    # Convert frame to HSV color space
+    frame=cv2.resize(frame,(160,80))
+    height, width, _ = frame.shape
+    lower_height = int(height / 2)  # Taking the lower half
+    lower_part = frame[lower_height:, :]
+    hsv = cv2.cvtColor(lower_part, cv2.COLOR_BGR2HSV)
+    
+    # Define color ranges for each color
+    color_ranges = {
+        'red': ([0, 40, 50], [10, 255, 255]),
+        #'blue':([94 ,50 ,51],[126 ,180 ,255]),
+        #'green': ([70, 229, 40], [92, 255, 130]),
+        'yellow': ([25, 50, 70], [30, 255, 255]),
+        #'black':([0,0 ,0],[180, 255, 30])
+    }
+    
+    # Initialize color_detected flag
+    color_detected = False
+    cx, cy = None, None
+    
+    # Detect each color
+    for color, (lower, upper) in color_ranges.items():
+        lower_bound = np.array(lower)
+        upper_bound = np.array(upper)
+        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        # Remove noise from the mask
+        cleaned_mask = remove_noise(mask, kernel_size=3, iterations=1)
+        result = cv2.bitwise_and(lower_part, lower_part, mask=cleaned_mask)
+        contours, _ = cv2.findContours(cleaned_mask, 1, cv2.CHAIN_APPROX_NONE)
+        
+        if len(contours) > 0:
+            # Color detected
+            
+            # Assuming only one contour is detected
+            c = max(contours, key=cv2.contourArea)
+            M = cv2.moments(c)
+            
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                color_detected = True
+                #print("cx",cx)
+                #print("cy",cy)
+                #print(f"{color.capitalize()} Detected - cx: {cx}, cy: {cy}")
+                
+            else:
+                #print(f"Warning: 'm00' is zero for {color} detection.")
+                cx, cy = 0, 0  # Set default values
+                color_detected = False
+            
+            cv2.line(lower_part, (cx, 0), (cx, 720), (255, 0, 0), 1)
+            cv2.line(lower_part, (0, cy), (1280, cy), (255, 0, 0), 1)
+            cv2.drawContours(lower_part, [c], -1, (0, 255, 0), 1)
+            #cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+            cv2.putText(lower_part, color.capitalize(), (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            motor(cx, cy, color_detected)
+            #break
+    if color_detected:
+        motor(cx, cy, color_detected)
+    else:
+        # If no color lines are detected, check for black lines
+        detect_black(frame)   
+     
+
+            
+    # Display the resulting frame
+    #cv2.imshow('frame', lower_part)
+    #cv2.imshow('hsv',hsv)
+    #cv2.imshow('clean_mask',cleaned_mask)
+    
+    
+def detect_shape(frame):
+    frame = cv2.resize(frame, (640, 480))
+    image = frame.copy()
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _,thresh_frame = cv2.threshold(blurred,threshold,255,cv2.THRESH_BINARY)
+    edges = cv2.Canny(thresh_frame,30,100)
+    contours, _ = cv2.findContours(edges, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Iterate through contours
+    for contour in contours:
+    # Approximate the shape
+        if cv2.contourArea(contour)>1000:
+            shape_name=shape(contour,contours) 
+            
+            # Draw the shape on the original image
+            cv2.drawContours(image, [contour], -1, (0, 255, 0), 2)
+            M = cv2.moments(contour)
+            if M['m00'] != 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
+                
+                if shape_name == "Left Arrow" or shape_name =="Right Arrow" or shape_name =="Up Arrow" or shape_name =="Down Arrow":
+                    cv2.putText(image, shape_name, (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+                    print(shape_name)
+                    
+                else:
+                    cv2.putText(image, shape_name, (cx,cy), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+                    print(shape_name)
+                    
+            else:
+            # Handle the case when 'm00' is zero
+            # For example, set cx and cy to some default values or print a message
+                #print("Warning: 'm00' is zero. No contours detected.")
+                x, y = 0, 0  # Set default values
+            #if shape_name == "Rectangle":
+                #tempmatch(gray,image)
+    #display_scale = 5
+    #height, width = image.shape[0:2]
+    #display_width,display_height = display_scale *height, display_scale *width
+    #frame_display = cv2.resize(image, (display_width,display_height),interpolation= cv2.INTER_CUBIC)
+    cv2.imshow("Shape Recognition", image)
+    
+    
+
+def facial_req(frame):
+    data = pickle.loads(open("/home/pi/Desktop/facial_recognition/encodings.pickle", "rb").read())
+    currentname = "unknown"
+    # Detect the face boxes
+    boxes = face_recognition.face_locations(frame)
+    # Compute the facial embeddings for each face bounding box
+    encodings = face_recognition.face_encodings(frame, boxes)
+    names = []
+
+    # Loop over the facial embeddings
+    threshold = 0.6  # Adjust this value as needed
+
+# Loop over the facial embeddings
+    for encoding in encodings:
+    # Attempt to match each face in the input image to our known encodings
+        distances = face_recognition.face_distance(data["encodings"], encoding)
+        min_distance_index = np.argmin(distances)
+        min_distance = distances[min_distance_index]
+
+        if min_distance <= threshold:
+            name = data["names"][min_distance_index]
+            print(name)
+        else:
+            name = "Unknown"
+
+        # Update the list of names
+        names.append(name)
+
+    # Loop over the recognized faces
+    for ((top, right, bottom, left), name) in zip(boxes, names):
+        # Draw the predicted face name on the image - color is in BGR
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 225), 2)
+        y = top - 15 if top - 15 > 15 else top + 15
+        cv2.putText(frame, name, (left, y), cv2.FONT_HERSHEY_SIMPLEX, .8, (0, 255, 255), 2)
+
+    # Display the image to our screen
+    cv2.imshow("Facial Recognition", frame)
+    key = cv2.waitKey(1) & 0xFF
+
+    # update the FPS counter
+    #fps.update()
+
+def facial_recognition_thread():
+    while True:
+        ret, frame = video_capture.read()
+        frame=cv2.resize(frame,(320,240))
+        if ret:
+            facial_req(frame)
+
+
+
+distance=0.0
+distance_measurement_detected = False  # Initialize distance measurement flag
+
+def tempmatch(frame):
+    #distance = 0.0
+    global distance
+    global distance_measurement_detected
+    frame = cv2.resize(frame, (640, 480))
+    image = frame.copy()
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    previousStateB=GPIO.input(encoderB)
+    templates = ["/home/pi/Desktop/template/1.jpg","/home/pi/Desktop/template/2.jpg","/home/pi/Desktop/template/3.jpg","/home/pi/Desktop/template/4.jpg"]
+    fxfy = [
+    [0.60,0.60], #1 Distance
+    [0.60,0.60], #2 Face Recognition
+    [0.60,0.60], #3 No Entry
+    [0.60,0.60]] #4 Stop
+    text = ['Distance', 'Face Recognition', 'No Entry','Stop']
+
+    threshold = [0.31, 0.42, 0.42, 0.36]
+    #global distance
+    
+    # Draw rectangles around matched regions
+    for i in range(len(templates)):
+        # Load and resize the template image
+        template = cv2.imread(templates[i], 0)
+        fx, fy = fxfy[i]
+        resized_template = cv2.resize(template, (0, 0), fx=fx, fy=fy)
+
+        # Perform template matching
+        result = cv2.matchTemplate(gray, resized_template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        #print(max_val)
+        if max_val > threshold[i]:
+            # Draw rectangle and put text
+            shape_name = text[i]
+            h, w = resized_template.shape
+            location = max_loc
+            bottom_right = (location[0] + resized_template.shape[1], location[1] + resized_template.shape[0])
+            #bottom_right = (location[0] + w, location[1] + h)
+            cv2.rectangle(image, location, bottom_right, (0, 255, 0), 2)
+            cv2.putText(image, shape_name, (location[0], location[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            print(shape_name)
+            
+            if shape_name == text[0]:
+                print("Distance: %.2f cm" %distance)
+                distance_measurement_detected = True
+               
+            elif shape_name == text[2] or shape_name == text[3]:
+                current_time=time.time()
+                while abs(current_time - time.time())< difference_time
+                    GPIO.output(in1,GPIO.LOW)
+                    GPIO.output(in2,GPIO.LOW)
+                    pwmA.ChangeDutyCycle(0)
+                    GPIO.output(in3,GPIO.LOW)
+                    GPIO.output(in4,GPIO.LOW)
+                    pwmB.ChangeDutyCycle(0)
+                #sleep(5)
+                
+            elif shape_name == text[1]:
+               
+                #print("Distance: %.2f cm" %distance)
+                
+                # Start the facial recognition thread
+                facial_thread = threading.Thread(target=facial_recognition_thread)
+                facial_thread.daemon = True
+                facial_thread.start()
+            
+            if distance_measurement_detected and shape_name == text[1]:
+                print("Final distance: %.2f cm" %distance)
+        
+        if distance_measurement_detected:
+        # Perform distance calculation here
+            currentStateB = GPIO.input(encoderB)
+            if currentStateB != previousStateB:
+                distance += (1 * 21.2 / 40)
+            previousStateB = currentStateB
+
+        
+        cv2.imshow("Image",image)
+
+
+
+while True:
+    # Capture the frames
+    ret, frame = video_capture.read()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    
+    detect_shape(frame)
+    detect_color(frame)
+    
+    #tempmatch(frame)
+    
+    # Detect color and follow line
+    
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+video_capture.release()
+cv2.destroyAllWindows()
