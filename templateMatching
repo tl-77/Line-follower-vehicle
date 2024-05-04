@@ -1,0 +1,68 @@
+import cv2
+import os
+import numpy as np
+from picamera.array import PiRGBArray
+from picamera import PiCamera
+import time
+
+# Initialize the camera
+camera = PiCamera()
+camera.resolution = (640, 480)
+camera.framerate = 32
+rawCapture = PiRGBArray(camera, size=(640, 480))
+time.sleep(0.1)  # Allow the camera to warm up
+
+# Load the template image
+templates = ["/home/pi/Desktop/template/1.jpg","/home/pi/Desktop/template/2.jpg","/home/pi/Desktop/template/3.jpg","/home/pi/Desktop/template/4.jpg"]
+#template = cv2.imread('/home/pi/Desktop/template/1.jpg', 0)  # Grayscale template
+#h, w = template.shape
+
+#tem_edges = cv2.Canny(template,50,150)
+fxfy = [
+    [0.60,0.60],
+    [0.60,0.60],
+    [0.60,0.60],
+    [0.60,0.60]]
+
+text = ['Distance', 'Face Recognition', 'No Entry', 'Stop']
+
+threshold = [0.60, 0.50, 0.55, 0.50]
+
+for frame in camera.capture_continuous(rawCapture, format="bgr", use_video_port=True):
+    image = frame.array  # Get the raw NumPy array representing the image
+    
+    # Convert the image to grayscale
+    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Draw rectangles around matched regions
+    for i in range(len(templates)):
+        # Load and resize the template image
+        template = cv2.imread(templates[i], 0)
+        fx, fy = fxfy[i]
+        resized_template = cv2.resize(template, (0, 0), fx=fx, fy=fy)
+
+        # Perform template matching
+        result = cv2.matchTemplate(img_gray, resized_template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        
+        if max_val > threshold[i]:
+            # Draw rectangle and put text
+            shape_name = text[i]
+            h, w = resized_template.shape
+            location = max_loc
+            bottom_right = (location[0] + w, location[1] + h)
+            cv2.rectangle(image, location, bottom_right, (0, 255, 0), 2)
+            cv2.putText(image, shape_name, (location[0], location[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    
+        
+    cv2.imshow("Template Matching", image)
+    key = cv2.waitKey(1) & 0xFF
+
+    # Break the loop if 'q' key is pressed
+    if key == ord("q"):
+        break
+
+    rawCapture.truncate(0)  # Clear the stream for the next frame
+
+# Clean up
+cv2.destroyAllWindows()
